@@ -67,7 +67,7 @@ function App() {
 
   useEffect(() => {
     // Initialize socket connection
-    socketRef.current = io('http://localhost:3000', {
+    socketRef.current = io('https://web-rtc-test-project.onrender.com', {
       transports: ['websocket'],
       reconnection: true,
       reconnectionAttempts: 5
