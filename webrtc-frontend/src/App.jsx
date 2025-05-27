@@ -37,7 +37,7 @@ const Button = styled.button`
   padding: 10px 20px;
   border: none;
   border-radius: 5px;
-  background-color: ${props => props.primary ? '#007bff' : '#6c757d'};
+  background-color: ${(props) => (props.primary ? '#007bff' : '#6c757d')};
   color: white;
   cursor: pointer;
   &:hover {
@@ -59,21 +59,21 @@ function App() {
   const [targetUserId, setTargetUserId] = useState('');
   const [userId] = useState(`user_${Math.random().toString(36).substr(2, 9)}`);
   const [connectionStatus, setConnectionStatus] = useState('');
-  
+  // const [targetUserId, setTargetUserId] = useState("");
+  const peerUserIdRef = useRef(""); 
   const localVideoRef = useRef();
   const remoteVideoRef = useRef();
   const peerConnectionRef = useRef();
   const socketRef = useRef();
 
   useEffect(() => {
-    // Initialize socket connection
+    // 1) Initialize Socket.IO
     socketRef.current = io('https://web-rtc-test-project.onrender.com', {
       transports: ['websocket'],
       reconnection: true,
-      reconnectionAttempts: 5
+      reconnectionAttempts: 5,
     });
 
-    // Socket event listeners
     socketRef.current.on('connect', () => {
       console.log('Connected to signaling server');
       socketRef.current.emit('join', userId);
@@ -95,16 +95,18 @@ function App() {
       setConnectionStatus('Connection error: ' + error.message);
     });
 
+    // 2) Listen for incoming offer / answer / ICE
     socketRef.current.on('offer', handleOffer);
     socketRef.current.on('answer', handleAnswer);
     socketRef.current.on('ice-candidate', handleIceCandidate);
 
-    // Initialize local stream
+    // 3) Grab local media immediately
     initializeLocalStream();
 
     return () => {
+      // Cleanup on unmount
       if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
+        localStream.getTracks().forEach((track) => track.stop());
       }
       if (peerConnectionRef.current) {
         peerConnectionRef.current.close();
@@ -118,15 +120,18 @@ function App() {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: { ideal: 1280 },
-          height: { ideal: 720 }
+          height: { ideal: 720 },
         },
-        audio: true
+        audio: true,
       });
       setLocalStream(stream);
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
-      console.log('Local stream initialized with tracks:', stream.getTracks().map(t => t.kind));
+      console.log(
+        'Local stream initialized with tracks:',
+        stream.getTracks().map((t) => t.kind)
+      );
     } catch (error) {
       console.error('Error accessing media devices:', error);
       setConnectionStatus('Error accessing camera/microphone: ' + error.message);
@@ -134,6 +139,7 @@ function App() {
   };
 
   const createPeerConnection = () => {
+    // If there’s already a PC, close it first
     if (peerConnectionRef.current) {
       console.log('Closing existing peer connection');
       peerConnectionRef.current.close();
@@ -145,84 +151,78 @@ function App() {
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' },
         { urls: 'stun:stun3.l.google.com:19302' },
-        { urls: 'stun:stun4.l.google.com:19302' }
+        { urls: 'stun:stun4.l.google.com:19302' },
       ],
       iceCandidatePoolSize: 10,
       bundlePolicy: 'max-bundle',
-      rtcpMuxPolicy: 'require'
+      rtcpMuxPolicy: 'require',
     };
 
     const pc = new RTCPeerConnection(configuration);
-    
-    // Add local stream tracks to peer connection
+
+    // Add our local tracks into this new RTCPeerConnection
     if (localStream) {
-      localStream.getTracks().forEach(track => {
+      localStream.getTracks().forEach((track) => {
         console.log('Adding track to peer connection:', track.kind);
         pc.addTrack(track, localStream);
       });
     }
 
-    // Handle ICE candidates
+    // Send any ICE candidates we discover to the other peer
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         console.log('New ICE candidate:', event.candidate);
         socketRef.current.emit('ice-candidate', {
           target: targetUserId,
           from: userId,
-          candidate: event.candidate
+          candidate: event.candidate,
         });
       }
     };
 
-    // Handle ICE connection state changes
     pc.oniceconnectionstatechange = () => {
       console.log('ICE Connection State:', pc.iceConnectionState);
       setConnectionStatus('ICE Connection: ' + pc.iceConnectionState);
     };
 
-    // Handle connection state changes
     pc.onconnectionstatechange = () => {
       console.log('Connection State:', pc.connectionState);
       setConnectionStatus('Connection: ' + pc.connectionState);
     };
 
-    // Handle remote stream
+    // —— FIX #1: Remove any onnegotiationneeded handler —— 
+    // pc.onnegotiationneeded = null; 
+    // (We are doing manual offer/answer, so we don’t need automatic negotiation.)
+
+    // —— FIX #2: A more robust ontrack handler —— 
     pc.ontrack = (event) => {
       console.log('Received remote track:', event.track.kind);
-      if (event.streams && event.streams[0]) {
-        console.log('Setting remote stream with tracks:', event.streams[0].getTracks().map(t => t.kind));
-        const remoteStream = event.streams[0];
-        setRemoteStream(remoteStream);
-        
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = remoteStream;
-          remoteVideoRef.current.onloadedmetadata = () => {
-            console.log('Remote video metadata loaded');
-            remoteVideoRef.current.play().catch(error => {
-              console.error('Error playing remote video:', error);
-            });
-          };
-        }
-      }
-    };
 
-    // Handle negotiation needed
-    pc.onnegotiationneeded = async () => {
-      try {
-        console.log('Negotiation needed');
-        const offer = await pc.createOffer({
-          offerToReceiveAudio: true,
-          offerToReceiveVideo: true
-        });
-        await pc.setLocalDescription(offer);
-        socketRef.current.emit('offer', {
-          target: targetUserId,
-          from: userId,
-          offer: pc.localDescription
-        });
-      } catch (error) {
-        console.error('Error during negotiation:', error);
-        setConnectionStatus('Error during negotiation: ' + error.message);
+      let incomingStream;
+      if (event.streams && event.streams[0]) {
+        // Browser already gave us a full MediaStream
+        incomingStream = event.streams[0];
+      } else {
+        // Some browsers do NOT populate event.streams[0] on first track
+        console.log('No event.streams[0], creating a new MediaStream');
+        incomingStream = new MediaStream();
+        incomingStream.addTrack(event.track);
+      }
+
+      console.log(
+        'Attaching remote stream with tracks:',
+        incomingStream.getTracks().map((t) => t.kind)
+      );
+      setRemoteStream(incomingStream);
+
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = incomingStream;
+        remoteVideoRef.current.onloadedmetadata = () => {
+          console.log('Remote video metadata loaded');
+          remoteVideoRef.current.play().catch((error) => {
+            console.error('Error playing remote video:', error);
+          });
+        };
       }
     };
 
@@ -237,23 +237,26 @@ function App() {
     }
 
     try {
+      // 1) Create a fresh RTCPeerConnection and add our tracks
       const pc = createPeerConnection();
+
+      // 2) Explicitly create an offer
       console.log('Creating offer...');
       const offer = await pc.createOffer({
         offerToReceiveAudio: true,
-        offerToReceiveVideo: true
+        offerToReceiveVideo: true,
       });
-      
+
       console.log('Setting local description...');
       await pc.setLocalDescription(offer);
 
       console.log('Sending offer to:', targetUserId);
-      socketRef.current.emit('offer', {
-        target: targetUserId,
-        from: userId,
-        offer: pc.localDescription
-      });
-
+      peerUserIdRef.current = targetUserId; 
+      socketRef.current.emit("offer", { 
+       target: peerUserIdRef.current, 
+       from: userId, 
+       offer: pc.localDescription 
+     });
       setIsCallActive(true);
       setConnectionStatus('Call initiated...');
     } catch (error) {
@@ -265,29 +268,33 @@ function App() {
   const handleOffer = async (data) => {
     console.log('Received offer from:', data.from);
     try {
+      // 1) Create a new PeerConnection
       const pc = createPeerConnection();
-      
+
+      // 2) Set their offer as our remote description
       console.log('Setting remote description...');
       await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-      
+
+      // 3) Create answer
       console.log('Creating answer...');
       const answer = await pc.createAnswer({
         offerToReceiveAudio: true,
-        offerToReceiveVideo: true
+        offerToReceiveVideo: true,
       });
-      
+
       console.log('Setting local description...');
       await pc.setLocalDescription(answer);
 
+      // 4) Send answer back to caller
       console.log('Sending answer to:', data.from);
       socketRef.current.emit('answer', {
         target: data.from,
         from: userId,
-        answer: pc.localDescription
+        answer: pc.localDescription,
       });
 
       setIsCallActive(true);
-      setConnectionStatus('Call connected...');
+      setConnectionStatus('Call connected…');
     } catch (error) {
       console.error('Error handling offer:', error);
       setConnectionStatus('Error handling offer: ' + error.message);
@@ -300,29 +307,12 @@ function App() {
       if (!peerConnectionRef.current) {
         throw new Error('No peer connection exists');
       }
-      console.log('Setting remote description with answer...');
+      console.log('Setting remote description with answer…');
       await peerConnectionRef.current.setRemoteDescription(
         new RTCSessionDescription(data.answer)
       );
-      
-      // Check if we already have a remote stream
-      const remoteStreams = peerConnectionRef.current.getRemoteStreams();
-      if (remoteStreams && remoteStreams.length > 0) {
-        console.log('Found existing remote stream, setting it up...');
-        const remoteStream = remoteStreams[0];
-        setRemoteStream(remoteStream);
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = remoteStream;
-          remoteVideoRef.current.onloadedmetadata = () => {
-            console.log('Remote video metadata loaded');
-            remoteVideoRef.current.play().catch(error => {
-              console.error('Error playing remote video:', error);
-            });
-          };
-        }
-      }
-      
-      setConnectionStatus('Call connected...');
+      // Once remoteDescription is set, ontrack() will fire and attach the stream
+      setConnectionStatus('Call connected…');
     } catch (error) {
       console.error('Error handling answer:', error);
       setConnectionStatus('Error handling answer: ' + error.message);
@@ -358,7 +348,7 @@ function App() {
       <h1>WebRTC Video Call</h1>
       <p>Your ID: {userId}</p>
       <p>Status: {connectionStatus}</p>
-      
+
       <VideoContainer>
         <div>
           <h3>Local Video</h3>
@@ -379,14 +369,16 @@ function App() {
             style={{ backgroundColor: '#000' }}
           />
           {!remoteStream && isCallActive && (
-            <div style={{ 
-              position: 'absolute', 
-              top: '50%', 
-              left: '50%', 
-              transform: 'translate(-50%, -50%)',
-              color: 'white'
-            }}>
-              Waiting for remote video...
+            <div
+              style={{
+                position: 'absolute',
+                top: '50%',
+                left: '50%',
+                transform: 'translate(-50%, -50%)',
+                color: 'white',
+              }}
+            >
+              Waiting for remote video…
             </div>
           )}
         </div>
@@ -405,9 +397,7 @@ function App() {
             Start Call
           </Button>
         ) : (
-          <Button onClick={endCall}>
-            End Call
-          </Button>
+          <Button onClick={endCall}>End Call</Button>
         )}
       </Controls>
     </Container>
