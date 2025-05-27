@@ -1,7 +1,11 @@
+// App.jsx
 import { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import styled from 'styled-components';
 
+/* ─────────────────────────────────────────────────────────────────────────────
+   Styled components for layout—no changes needed here if you already have them
+─────────────────────────────────────────────────────────────────────────────*/
 const Container = styled.div`
   display: flex;
   flex-direction: column;
@@ -52,22 +56,27 @@ const Input = styled.input`
   margin-right: 10px;
 `;
 
+/* ─────────────────────────────────────────────────────────────────────────────
+   App component starts here
+─────────────────────────────────────────────────────────────────────────────*/
 function App() {
+  // ─── State & refs ─────────────────────────────────────────────────────────
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [isCallActive, setIsCallActive] = useState(false);
   const [targetUserId, setTargetUserId] = useState('');
   const [userId] = useState(`user_${Math.random().toString(36).substr(2, 9)}`);
   const [connectionStatus, setConnectionStatus] = useState('');
-  // const [targetUserId, setTargetUserId] = useState("");
-  const peerUserIdRef = useRef(""); 
+
   const localVideoRef = useRef();
   const remoteVideoRef = useRef();
   const peerConnectionRef = useRef();
   const socketRef = useRef();
+  const peerUserIdRef = useRef(''); 
+  // ──────────────────────────────────────────────────────────────────────────
 
   useEffect(() => {
-    // 1) Initialize Socket.IO
+    /* ─ Step 1: Initialize Socket.IO and listeners ───────────────────────────── */
     socketRef.current = io('https://web-rtc-test-project.onrender.com', {
       transports: ['websocket'],
       reconnection: true,
@@ -95,12 +104,13 @@ function App() {
       setConnectionStatus('Connection error: ' + error.message);
     });
 
-    // 2) Listen for incoming offer / answer / ICE
+    // Listen for incoming offer / answer / ICE
     socketRef.current.on('offer', handleOffer);
     socketRef.current.on('answer', handleAnswer);
     socketRef.current.on('ice-candidate', handleIceCandidate);
+    /* ────────────────────────────────────────────────────────────────────────── */
 
-    // 3) Grab local media immediately
+    /* ─ Step 2: Grab local media right away ──────────────────────────────────── */
     initializeLocalStream();
 
     return () => {
@@ -113,8 +123,14 @@ function App() {
       }
       socketRef.current.disconnect();
     };
+    // We deliberately leave out peerConnectionRef and all listener fns from dependency list
+    // so that the initial setup runs once. localStream will update in initializeLocalStream().
   }, []);
 
+  /* ─────────────────────────────────────────────────────────────────────────────
+     initializeLocalStream:
+     Fetches getUserMedia, displays it in the local <video>, and stores it in state.
+  ──────────────────────────────────────────────────────────────────────────────*/
   const initializeLocalStream = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -138,8 +154,14 @@ function App() {
     }
   };
 
+  /* ─────────────────────────────────────────────────────────────────────────────
+     createPeerConnection:
+     - Closes any existing RTCPeerConnection
+     - Creates a new one with STUN servers
+     - Hooks up onicecandidate, onconnectionstatechange, and ontrack 
+     (no more onnegotiationneeded here).
+  ──────────────────────────────────────────────────────────────────────────────*/
   const createPeerConnection = () => {
-    // If there’s already a PC, close it first
     if (peerConnectionRef.current) {
       console.log('Closing existing peer connection');
       peerConnectionRef.current.close();
@@ -168,42 +190,43 @@ function App() {
       });
     }
 
-    // Send any ICE candidates we discover to the other peer
+    // ─── ICE candidates → send to the other peer ───────────────────────────────
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         console.log('New ICE candidate:', event.candidate);
+        // Always send ICE to peerUserIdRef.current if available; otherwise fallback to state
+        const trueTarget = peerUserIdRef.current || targetUserId;
         socketRef.current.emit('ice-candidate', {
-          target: targetUserId,
+          target: trueTarget,
           from: userId,
           candidate: event.candidate,
         });
       }
     };
 
+    // Monitor ICE connection state
     pc.oniceconnectionstatechange = () => {
       console.log('ICE Connection State:', pc.iceConnectionState);
       setConnectionStatus('ICE Connection: ' + pc.iceConnectionState);
     };
 
+    // Monitor overall peerConnection state
     pc.onconnectionstatechange = () => {
       console.log('Connection State:', pc.connectionState);
       setConnectionStatus('Connection: ' + pc.connectionState);
     };
 
-    // —— FIX #1: Remove any onnegotiationneeded handler —— 
-    // pc.onnegotiationneeded = null; 
-    // (We are doing manual offer/answer, so we don’t need automatic negotiation.)
-
-    // —— FIX #2: A more robust ontrack handler —— 
+    // ─── The crucial ontrack handler ───────────────────────────────────────────
+    // When remote track(s) arrive, attach to the <video> tag.
     pc.ontrack = (event) => {
       console.log('Received remote track:', event.track.kind);
 
       let incomingStream;
       if (event.streams && event.streams[0]) {
-        // Browser already gave us a full MediaStream
+        // Browser gave us a full MediaStream
         incomingStream = event.streams[0];
       } else {
-        // Some browsers do NOT populate event.streams[0] on first track
+        // Some browsers do NOT populate event.streams[0] on the first track
         console.log('No event.streams[0], creating a new MediaStream');
         incomingStream = new MediaStream();
         incomingStream.addTrack(event.track);
@@ -219,9 +242,9 @@ function App() {
         remoteVideoRef.current.srcObject = incomingStream;
         remoteVideoRef.current.onloadedmetadata = () => {
           console.log('Remote video metadata loaded');
-          remoteVideoRef.current.play().catch((error) => {
-            console.error('Error playing remote video:', error);
-          });
+          remoteVideoRef.current
+            .play()
+            .catch((error) => console.error('Error playing remote video:', error));
         };
       }
     };
@@ -230,6 +253,13 @@ function App() {
     return pc;
   };
 
+  /* ─────────────────────────────────────────────────────────────────────────────
+     startCall (caller flow)
+     1) Create a new PeerConnection
+     2) Create an offer, set it as localDescription
+     3) PUSH that offer to the callee's socket ID (peerUserIdRef.current)
+     4) Mark isCallActive = true so UI switches to “End Call”
+  ──────────────────────────────────────────────────────────────────────────────*/
   const startCall = async () => {
     if (!targetUserId) {
       setConnectionStatus('Please enter a target user ID');
@@ -237,26 +267,26 @@ function App() {
     }
 
     try {
-      // 1) Create a fresh RTCPeerConnection and add our tracks
+      // 1) Create PeerConnection (adds local tracks and sets up handlers)
       const pc = createPeerConnection();
 
-      // 2) Explicitly create an offer
+      // 2) Make an offer
       console.log('Creating offer...');
       const offer = await pc.createOffer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: true,
       });
-
-      console.log('Setting local description...');
       await pc.setLocalDescription(offer);
 
-      console.log('Sending offer to:', targetUserId);
-      peerUserIdRef.current = targetUserId; 
-      socketRef.current.emit("offer", { 
-       target: peerUserIdRef.current, 
-       from: userId, 
-       offer: pc.localDescription 
-     });
+      // 3) Write callee’s ID into the ref and send the offer
+      peerUserIdRef.current = targetUserId;
+      console.log('Sending offer to:', peerUserIdRef.current);
+      socketRef.current.emit('offer', {
+        target: peerUserIdRef.current,
+        from: userId,
+        offer: pc.localDescription,
+      });
+
       setIsCallActive(true);
       setConnectionStatus('Call initiated...');
     } catch (error) {
@@ -265,30 +295,38 @@ function App() {
     }
   };
 
+  /* ─────────────────────────────────────────────────────────────────────────────
+     handleOffer (callee flow)
+     1) As soon as we see data.from, store it in peerUserIdRef.current
+     2) Create a new PeerConnection
+     3) setRemoteDescription(offer)
+     4) createAnswer(), setLocalDescription(answer)
+     5) send that answer back to data.from (which is in peerUserIdRef.current)
+  ──────────────────────────────────────────────────────────────────────────────*/
   const handleOffer = async (data) => {
     console.log('Received offer from:', data.from);
+    // 1) Remember caller’s ID so ICE goes back there
+    peerUserIdRef.current = data.from;
+
     try {
-      // 1) Create a new PeerConnection
+      // 2) Create a fresh RTCPeerConnection (adds local tracks, sets up ontrack)
       const pc = createPeerConnection();
 
-      // 2) Set their offer as our remote description
+      // 3) Set their offer as our remote description
       console.log('Setting remote description...');
       await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
 
-      // 3) Create answer
+      // 4) Create and send back an answer
       console.log('Creating answer...');
       const answer = await pc.createAnswer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: true,
       });
-
-      console.log('Setting local description...');
       await pc.setLocalDescription(answer);
 
-      // 4) Send answer back to caller
-      console.log('Sending answer to:', data.from);
+      console.log('Sending answer to:', peerUserIdRef.current);
       socketRef.current.emit('answer', {
-        target: data.from,
+        target: peerUserIdRef.current,
         from: userId,
         answer: pc.localDescription,
       });
@@ -301,6 +339,11 @@ function App() {
     }
   };
 
+  /* ─────────────────────────────────────────────────────────────────────────────
+     handleAnswer (caller receives callee’s answer)
+     1) Simply setRemoteDescription(answer)
+     2) Our ontrack from earlier (in createPeerConnection) will fire when RTP starts.
+  ──────────────────────────────────────────────────────────────────────────────*/
   const handleAnswer = async (data) => {
     console.log('Received answer from:', data.from);
     try {
@@ -311,7 +354,8 @@ function App() {
       await peerConnectionRef.current.setRemoteDescription(
         new RTCSessionDescription(data.answer)
       );
-      // Once remoteDescription is set, ontrack() will fire and attach the stream
+      // As soon as remoteDescription is set, the ICE handshake should finish,
+      // and ontrack() will fire to attach the remote stream. No extra code needed.
       setConnectionStatus('Call connected…');
     } catch (error) {
       console.error('Error handling answer:', error);
@@ -319,6 +363,10 @@ function App() {
     }
   };
 
+  /* ─────────────────────────────────────────────────────────────────────────────
+     handleIceCandidate (both sides)
+     Just add new ICE candidates to the existing RTCPeerConnection.
+  ──────────────────────────────────────────────────────────────────────────────*/
   const handleIceCandidate = async (data) => {
     console.log('Received ICE candidate from:', data.from);
     try {
@@ -333,6 +381,12 @@ function App() {
     }
   };
 
+  /* ─────────────────────────────────────────────────────────────────────────────
+     endCall (either side clicks “End Call”)
+     - Close peerConnection (stops all RTC activity)
+     - Clear remoteStream so <video> goes blank
+     - Mark isCallActive=false to show “Start Call” again
+  ──────────────────────────────────────────────────────────────────────────────*/
   const endCall = () => {
     if (peerConnectionRef.current) {
       peerConnectionRef.current.close();
@@ -343,6 +397,9 @@ function App() {
     setConnectionStatus('Call ended');
   };
 
+  /* ─────────────────────────────────────────────────────────────────────────────
+     Render UI
+  ──────────────────────────────────────────────────────────────────────────────*/
   return (
     <Container>
       <h1>WebRTC Video Call</h1>
@@ -363,11 +420,12 @@ function App() {
         <div>
           <h3>Remote Video</h3>
           <Video
-            ref={remoteVideoRef}
-            autoPlay
-            playsInline
-            style={{ backgroundColor: '#000' }}
-          />
+   ref={remoteVideoRef}
+   autoPlay 
+   playsInline 
+  //  muted      // ← allow autoplay by muting 
+   style={{ backgroundColor: '#000' }} 
+ />
           {!remoteStream && isCallActive && (
             <div
               style={{
