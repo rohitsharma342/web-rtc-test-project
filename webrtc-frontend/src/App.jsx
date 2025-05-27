@@ -80,6 +80,16 @@ function App() {
       setConnectionStatus('Connected to signaling server');
     });
 
+    socketRef.current.on('joined', (data) => {
+      console.log('Successfully joined:', data);
+      setConnectionStatus('Ready to make calls');
+    });
+
+    socketRef.current.on('error', (error) => {
+      console.error('Signaling error:', error);
+      setConnectionStatus('Error: ' + error.message);
+    });
+
     socketRef.current.on('connect_error', (error) => {
       console.error('Connection error:', error);
       setConnectionStatus('Connection error: ' + error.message);
@@ -106,14 +116,17 @@ function App() {
   const initializeLocalStream = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
         audio: true
       });
       setLocalStream(stream);
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
-      console.log('Local stream initialized');
+      console.log('Local stream initialized with tracks:', stream.getTracks().map(t => t.kind));
     } catch (error) {
       console.error('Error accessing media devices:', error);
       setConnectionStatus('Error accessing camera/microphone: ' + error.message);
@@ -121,6 +134,11 @@ function App() {
   };
 
   const createPeerConnection = () => {
+    if (peerConnectionRef.current) {
+      console.log('Closing existing peer connection');
+      peerConnectionRef.current.close();
+    }
+
     const configuration = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -129,7 +147,9 @@ function App() {
         { urls: 'stun:stun3.l.google.com:19302' },
         { urls: 'stun:stun4.l.google.com:19302' }
       ],
-      iceCandidatePoolSize: 10
+      iceCandidatePoolSize: 10,
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require'
     };
 
     const pc = new RTCPeerConnection(configuration);
@@ -169,9 +189,40 @@ function App() {
     // Handle remote stream
     pc.ontrack = (event) => {
       console.log('Received remote track:', event.track.kind);
-      setRemoteStream(event.streams[0]);
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = event.streams[0];
+      if (event.streams && event.streams[0]) {
+        console.log('Setting remote stream with tracks:', event.streams[0].getTracks().map(t => t.kind));
+        const remoteStream = event.streams[0];
+        setRemoteStream(remoteStream);
+        
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = remoteStream;
+          remoteVideoRef.current.onloadedmetadata = () => {
+            console.log('Remote video metadata loaded');
+            remoteVideoRef.current.play().catch(error => {
+              console.error('Error playing remote video:', error);
+            });
+          };
+        }
+      }
+    };
+
+    // Handle negotiation needed
+    pc.onnegotiationneeded = async () => {
+      try {
+        console.log('Negotiation needed');
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true
+        });
+        await pc.setLocalDescription(offer);
+        socketRef.current.emit('offer', {
+          target: targetUserId,
+          from: userId,
+          offer: pc.localDescription
+        });
+      } catch (error) {
+        console.error('Error during negotiation:', error);
+        setConnectionStatus('Error during negotiation: ' + error.message);
       }
     };
 
@@ -200,7 +251,7 @@ function App() {
       socketRef.current.emit('offer', {
         target: targetUserId,
         from: userId,
-        offer: offer
+        offer: pc.localDescription
       });
 
       setIsCallActive(true);
@@ -220,7 +271,10 @@ function App() {
       await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
       
       console.log('Creating answer...');
-      const answer = await pc.createAnswer();
+      const answer = await pc.createAnswer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true
+      });
       
       console.log('Setting local description...');
       await pc.setLocalDescription(answer);
@@ -229,7 +283,7 @@ function App() {
       socketRef.current.emit('answer', {
         target: data.from,
         from: userId,
-        answer: answer
+        answer: pc.localDescription
       });
 
       setIsCallActive(true);
@@ -246,9 +300,28 @@ function App() {
       if (!peerConnectionRef.current) {
         throw new Error('No peer connection exists');
       }
+      console.log('Setting remote description with answer...');
       await peerConnectionRef.current.setRemoteDescription(
         new RTCSessionDescription(data.answer)
       );
+      
+      // Check if we already have a remote stream
+      const remoteStreams = peerConnectionRef.current.getRemoteStreams();
+      if (remoteStreams && remoteStreams.length > 0) {
+        console.log('Found existing remote stream, setting it up...');
+        const remoteStream = remoteStreams[0];
+        setRemoteStream(remoteStream);
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = remoteStream;
+          remoteVideoRef.current.onloadedmetadata = () => {
+            console.log('Remote video metadata loaded');
+            remoteVideoRef.current.play().catch(error => {
+              console.error('Error playing remote video:', error);
+            });
+          };
+        }
+      }
+      
       setConnectionStatus('Call connected...');
     } catch (error) {
       console.error('Error handling answer:', error);
@@ -287,19 +360,36 @@ function App() {
       <p>Status: {connectionStatus}</p>
       
       <VideoContainer>
-        <Video
-          ref={localVideoRef}
-          autoPlay
-          muted
-          playsInline
-        />
-        {remoteStream && (
+        <div>
+          <h3>Local Video</h3>
+          <Video
+            ref={localVideoRef}
+            autoPlay
+            muted
+            playsInline
+            style={{ transform: 'scaleX(-1)' }}
+          />
+        </div>
+        <div>
+          <h3>Remote Video</h3>
           <Video
             ref={remoteVideoRef}
             autoPlay
             playsInline
+            style={{ backgroundColor: '#000' }}
           />
-        )}
+          {!remoteStream && isCallActive && (
+            <div style={{ 
+              position: 'absolute', 
+              top: '50%', 
+              left: '50%', 
+              transform: 'translate(-50%, -50%)',
+              color: 'white'
+            }}>
+              Waiting for remote video...
+            </div>
+          )}
+        </div>
       </VideoContainer>
 
       <Controls>
